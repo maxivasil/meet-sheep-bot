@@ -94,7 +94,7 @@ DISPLAY_NAME = os.getenv("MEET_DISPLAY_NAME", "Estudiante")
 USE_PROFILE_CLONE = os.getenv("USE_PROFILE_CLONE", "false").lower() in ("true", "1", "t")
 
 # 7. Parámetros de control de asistencia
-MIN_UNIQUE_NUMBERS = 3         # Cantidad de números distintos de otros usuarios para confirmar toma de asistencia
+MIN_UNIQUE_NUMBERS = 5         # Cantidad de números distintos de otros usuarios para confirmar toma de asistencia
 REGEX_NUMERIC_PATTERN = r'\b\d{5,8}\b'  # Expresión regular para capturar DNIs/Padrones (5 a 8 dígitos)
 
 # 6. Tiempos de espera (en segundos)
@@ -102,7 +102,7 @@ TIMEOUT_JOIN_BUTTON = 45       # Espera máxima para encontrar el botón de ingr
 TIMEOUT_CHAT_PANEL = 20        # Espera máxima para abrir el chat
 TIMEOUT_CHAT_INPUT = 15        # Espera máxima para encontrar la caja de texto del chat
 CHECK_INTERVAL_SECONDS = 3     # Frecuencia de escaneo del chat
-MAX_MONITORING_TIME_SECONDS = 3600 # Tiempo máximo de monitoreo antes de finalizar (1 hora)
+MAX_MONITORING_TIME_SECONDS = 10800 # Tiempo máximo de monitoreo antes de finalizar (3 horas)
 
 # 7. Ruta del archivo de registro de asistencia
 LOG_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asistencia.log")
@@ -356,6 +356,16 @@ def join_meet(driver: webdriver.Chrome) -> bool:
     # 1. Autocompletar el nombre de usuario si Google Meet lo solicita
     handle_name_input_if_present(driver, DISPLAY_NAME)
 
+    # 2. Apagar micrófono y cámara EN LA PANTALLA PREVIA antes de solicitar unirse
+    try:
+        body = driver.find_element(By.TAG_NAME, "body")
+        body.send_keys(Keys.CONTROL + "d")
+        time.sleep(0.5)
+        body.send_keys(Keys.CONTROL + "e")
+        logger.info("Cámara y micrófono desactivados previamente en la pantalla de vista previa.")
+    except Exception as e:
+        logger.debug(f"No se pudieron enviar los atajos previos: {e}")
+
     # Palabras clave en minúsculas para identificar el botón de ingreso a la reunión
     join_keywords = [
         "unir", "unirme", "unirse", "unirte", "join", "pedir", "solicitar", "volver", "entrar", "reincorporar"
@@ -428,29 +438,25 @@ def join_meet(driver: webdriver.Chrome) -> bool:
         logger.warning("El click directo falló. Intentando click mediante JavaScript...")
         driver.execute_script("arguments[0].click();", join_button)
 
-    # Desactivar micrófono y cámara adicionalmente mediante atajos por seguridad
-    time.sleep(3)
-    try:
-        body = driver.find_element(By.TAG_NAME, "body")
-        # Ctrl+D desactiva micrófono / Ctrl+E desactiva cámara en Google Meet
-        body.send_keys(Keys.CONTROL + "d")
-        body.send_keys(Keys.CONTROL + "e")
-        logger.info("Atajos de teclado aplicados para silenciar cámara y micrófono.")
-    except Exception as e:
-        logger.debug(f"No se pudieron enviar los atajos de deshabilitación: {e}")
-
+    time.sleep(2)
     return True
 
 
 def ensure_chat_open(driver: webdriver.Chrome) -> bool:
     """
     Verifica si el panel de chat está visible y, si no lo está, interactúa para abrirlo.
-    Si el panel de chat no está abierto, los mensajes no se cargan en el DOM.
+    Evita hacer click en el botón si el campo de texto del chat ya está desplegado.
     """
-    logger.info("Verificando apertura del panel de chat...")
-    wait = WebDriverWait(driver, TIMEOUT_CHAT_PANEL)
+    # 1. Comprobación directa: Si la caja de texto del chat (textarea) está visible, el chat está 100% abierto
+    try:
+        textareas = driver.find_elements(By.TAG_NAME, "textarea")
+        for ta in textareas:
+            if ta.is_displayed():
+                return True
+    except Exception:
+        pass
 
-    # XPath para identificar el panel de chat en el DOM
+    # 2. Comprobación secundaria por contenedores de chat
     chat_panel_xpaths = [
         "//div[@aria-live='polite']",
         "//div[contains(@aria-label, 'Chat') or contains(@aria-label, 'chat')]",
@@ -458,12 +464,17 @@ def ensure_chat_open(driver: webdriver.Chrome) -> bool:
     ]
 
     for xpath in chat_panel_xpaths:
-        elements = driver.find_elements(By.XPATH, xpath)
-        if len(elements) > 0 and elements[0].is_displayed():
-            logger.info("El panel de chat ya está abierto y visible.")
-            return True
+        try:
+            elements = driver.find_elements(By.XPATH, xpath)
+            if len(elements) > 0 and any(e.is_displayed() for e in elements):
+                return True
+        except Exception:
+            continue
 
-    # Si no está visible, intentamos abrirlo haciendo click en el botón de chat o enviando atajo
+    logger.info("El panel de chat no está visible. Intentando abrirlo...")
+    wait = WebDriverWait(driver, TIMEOUT_CHAT_PANEL)
+
+    # 3. Intentar abrir el chat mediante el botón
     chat_button_xpaths = [
         "//button[contains(@aria-label, 'Chat con todos') or contains(@aria-label, 'Chat with everyone') or contains(@aria-label, 'Chat')]",
         "//button[@jsname='A533Id']",
@@ -533,49 +544,59 @@ def scan_chat_for_numbers(driver: webdriver.Chrome) -> List[str]:
     return extracted_numbers
 
 
-def send_attendance_and_exit(driver: webdriver.Chrome, padron: str) -> bool:
+def send_attendance(driver: webdriver.Chrome, padron: str) -> bool:
     """
-    Escribe el número de padrón en el campo de texto del chat, presiona Enter,
-    registra la hora exacta en el log y finaliza.
+    Escribe el número de padrón en el campo de texto del chat, presiona Enter
+    y registra la hora exacta en el log de forma instantánea.
     """
     logger.info(f"Procediendo a enviar el número de padrón: {padron}")
-    wait = WebDriverWait(driver, TIMEOUT_CHAT_INPUT)
-
-    input_xpaths = [
-        "//textarea[contains(@aria-label, 'Enviar un mensaje') or contains(@aria-label, 'Send a message')]",
-        "//textarea[contains(@placeholder, 'Enviar un mensaje') or contains(@placeholder, 'Send a message')]",
-        "//textarea[@name='chatMessage']",
-        "//textarea"
-    ]
-
     chat_input = None
-    for xpath in input_xpaths:
-        try:
-            chat_input = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
-            if chat_input and chat_input.is_displayed():
+
+    # 1. Búsqueda instantánea directa por tag <textarea> (evita retrasos de timeout de 15s)
+    try:
+        textareas = driver.find_elements(By.TAG_NAME, "textarea")
+        for ta in textareas:
+            if ta.is_displayed():
+                chat_input = ta
                 break
-        except TimeoutException:
-            continue
+    except Exception:
+        pass
+
+    # 2. Respaldo por XPath con timeout corto de 3s si la búsqueda directa no lo encuentra
+    if not chat_input:
+        wait = WebDriverWait(driver, 3)
+        input_xpaths = [
+            "//textarea",
+            "//textarea[contains(@aria-label, 'Enviar') or contains(@aria-label, 'Send')]",
+            "//textarea[@name='chatMessage']"
+        ]
+        for xpath in input_xpaths:
+            try:
+                elem = wait.until(EC.element_to_be_clickable((By.XPATH, xpath)))
+                if elem and elem.is_displayed():
+                    chat_input = elem
+                    break
+            except TimeoutException:
+                continue
 
     if not chat_input:
         logger.error("No se pudo localizar el campo de texto del chat para enviar el padrón.")
         return False
 
     try:
-        # Limpiar y escribir el número de padrón
+        # Escribir y enviar el número de padrón
         chat_input.click()
-        time.sleep(0.5)
+        time.sleep(1)
         chat_input.clear()
         chat_input.send_keys(padron)
-        time.sleep(0.5)
+        time.sleep(2)
         chat_input.send_keys(Keys.ENTER)
         
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         success_message = f"=== PRESENTE ENVIADO CON ÉXITO === | Padrón: {padron} | Hora: {timestamp}"
         logger.info(success_message)
 
-        # Dar tiempo a que el mensaje viaje por la red antes de cerrar
-        time.sleep(5)
+        time.sleep(1)
         return True
 
     except Exception as e:
@@ -583,13 +604,157 @@ def send_attendance_and_exit(driver: webdriver.Chrome, padron: str) -> bool:
         return False
 
 
+def get_participant_count(driver: webdriver.Chrome) -> int:
+    """
+    Intenta obtener el número actual de participantes en la llamada de Google Meet.
+    Retorna el número de personas detectado o -1 si no se pudo determinar.
+    """
+    try:
+        participant_xpaths = [
+            "//button[contains(@aria-label, 'personas') or contains(@aria-label, 'people') or contains(@aria-label, 'Mostrar a todos') or contains(@aria-label, 'Show everyone') or contains(@aria-label, 'participantes') or contains(@aria-label, 'participants')]",
+            "//div[contains(@aria-label, 'personas') or contains(@aria-label, 'people') or contains(@aria-label, 'participantes') or contains(@aria-label, 'participants')]",
+            "//div[contains(@class, 'uGfW4')]",
+            "//button[@jsname='A533Id' or @jsname='r8qRAd']"
+        ]
+
+        for xpath in participant_xpaths:
+            elements = driver.find_elements(By.XPATH, xpath)
+            for elem in elements:
+                aria = elem.get_attribute("aria-label") or ""
+                text = elem.text or ""
+                combined = f"{aria} {text}".lower()
+
+                # Buscar patrones como "(1)", "1 persona", "1 participant", etc.
+                match = re.search(r'\((\d+)\)', combined) or re.search(r'\b(\d+)\s*(personas|people|participantes|participants)\b', combined)
+                if match:
+                    count = int(match.group(1))
+                    if 1 <= count <= 500:
+                        return count
+
+                # Si el texto directo del elemento es solo un número (ej. "1", "12")
+                if text.strip().isdigit():
+                    count = int(text.strip())
+                    if 1 <= count <= 500:
+                        return count
+
+    except Exception:
+        pass
+    return -1
+
+
+def is_in_active_call(driver: webdriver.Chrome) -> bool:
+    """
+    Verifica si el usuario está actualmente dentro de una llamada activa en Google Meet.
+    """
+    try:
+        leave_btns = driver.find_elements(
+            By.XPATH, 
+            "//button[contains(@aria-label, 'Salir de la llamada') or contains(@aria-label, 'Leave call') or contains(@aria-label, 'Colgar') or @jsname='h1U9Be']"
+        )
+        return len(leave_btns) > 0 and any(btn.is_displayed() for btn in leave_btns)
+    except Exception:
+        return False
+
+
+def check_meeting_ended(driver: webdriver.Chrome, elapsed_seconds: float = 0.0) -> bool:
+    """
+    Verifica si la llamada de Google Meet ha finalizado (porque el profesor cortó la llamada
+    para todos, cerró la sala, se fueron los participantes o aparecieron modales de cierre).
+    """
+    try:
+        url = driver.current_url.lower()
+        # Redirecciones típicas tras salir o finalizar la llamada
+        if "meet.google.com" in url and any(kw in url for kw in ["landing", "checkout", "ended", "byebye"]):
+            logger.info("Detección de fin de llamada: Redireccionado a página de cierre.")
+            return True
+
+        # 1. Si ya pasó el tiempo inicial de ingreso (>15s) y el botón de colgar desapareció de la pantalla
+        if elapsed_seconds > 15 and not is_in_active_call(driver):
+            logger.info("Detección de fin de llamada: La reunión fue finalizada (el botón de salir ya no existe).")
+            return True
+
+        # 2. Escanear texto de la página y de posibles modales/diálogos emergentes
+        page_text = driver.find_element(By.TAG_NAME, "body").text.lower()
+        try:
+            dialogs = driver.find_elements(By.XPATH, "//div[@role='dialog' or @role='alertdialog']")
+            for dlg in dialogs:
+                if dlg.is_displayed():
+                    page_text += " " + dlg.text.lower()
+        except Exception:
+            pass
+
+        # Mensajes explícitos de reunión finalizada
+        ended_keywords = [
+            "finalizado la llamada",
+            "finalizó la llamada",
+            "finalizó la reunión",
+            "reunión finalizada",
+            "llamada finalizada",
+            "ha finalizado",
+            "el anfitrión finalizó",
+            "la llamada para todos",
+            "has salido de la reunión",
+            "te han eliminado",
+            "has sido eliminado",
+            "call has ended",
+            "the call ended",
+            "meeting ended",
+            "you left the meeting",
+            "you've been removed",
+            "la llamada finalizó",
+            "volver a la pantalla principal",
+            "pantalla de inicio",
+            "unirte de nuevo",
+            "reintegrarse"
+        ]
+
+        for kw in ended_keywords:
+            if kw in page_text:
+                logger.info(f"Detección de fin de llamada: Detectado mensaje en pantalla/modal ('{kw}').")
+                return True
+
+        # 3. Mensajes o indicativos de "quedaste solo en la reunión"
+        alone_keywords = [
+            "solo tú",
+            "solo tu",
+            "solamente tú",
+            "solamente tu",
+            "eres el único",
+            "eres la única",
+            "no hay nadie más",
+            "you're the only one",
+            "you are the only one",
+            "only person in the call",
+            "you're the only person"
+        ]
+
+        for kw in alone_keywords:
+            if kw in page_text:
+                logger.info(f"Detección de fin de llamada: Quedaste solo en la reunión ('{kw}').")
+                return True
+
+        # 4. Conteo de participantes: si ha pasado un margen de estabilidad (>20s) y el conteo es <= 1
+        if elapsed_seconds > 20:
+            count = get_participant_count(driver)
+            if count != -1 and count <= 1:
+                logger.info(f"Detección de fin de llamada: Conteo de participantes = {count} (Quedaste solo en la reunión).")
+                return True
+
+    except Exception as e:
+        logger.debug(f"Error en check_meeting_ended: {e}")
+
+    return False
+
+
 def monitor_attendance_loop(driver: webdriver.Chrome):
     """
-    Loop principal de monitoreo pasivo del chat.
-    Detecta padrones enviados por otros usuarios y activa la respuesta cuando
-    se alcanza el umbral de seguridad anti-falsos positivos.
+    Loop principal de monitoreo pasivo y permanencia en la llamada.
+    Fase 1: Detecta padrones enviados por otros usuarios y envía el propio cuando
+            se alcanza el umbral de seguridad.
+    Fase 2: Permanece en la clase de forma silenciosa hasta que la reunión finalice.
     """
     unique_detected_numbers: Set[str] = set()
+    attendance_sent = False
     start_time = time.time()
 
     logger.info("=================================================================")
@@ -599,39 +764,55 @@ def monitor_attendance_loop(driver: webdriver.Chrome):
     while True:
         elapsed = time.time() - start_time
         if elapsed > MAX_MONITORING_TIME_SECONDS:
-            logger.warning("Se alcanzó el tiempo máximo de monitoreo sin detectar la toma de asistencia. Finalizando.")
+            logger.warning("Se alcanzó el tiempo máximo de monitoreo. Finalizando sesión.")
             break
 
-        # Asegurarse de que el chat siga abierto
-        ensure_chat_open(driver)
-
-        # Escanear mensajes
-        current_matches = scan_chat_for_numbers(driver)
-
-        new_additions = False
-        for num in current_matches:
-            # Ignorar nuestro propio padrón si ya hubiese sido procesado
-            if num != PADRON and num not in unique_detected_numbers:
-                unique_detected_numbers.add(num)
-                new_additions = True
-                logger.info(f"-> Nuevo padrón/DNI detectado en el chat: {num}")
-
-        if new_additions:
-            logger.info(
-                f"Estado actual de detección: {len(unique_detected_numbers)}/{MIN_UNIQUE_NUMBERS} números distintos "
-                f"| Detectados: {sorted(list(unique_detected_numbers))}"
-            )
-
-        # Verificación del umbral anti-falsos positivos
-        if len(unique_detected_numbers) >= MIN_UNIQUE_NUMBERS:
+        # 1. VERIFICAR PRIMERO SI LA LLAMADA O CLASE YA FINALIZÓ (ANTES DE INTENTAR ABRIR CHAT)
+        if check_meeting_ended(driver, elapsed_seconds=elapsed):
             logger.info("=================================================================")
-            logger.info(f"¡Toma de asistencia confirmada! ({len(unique_detected_numbers)} números detectados).")
+            if attendance_sent:
+                logger.info("¡La clase ha finalizado! Asistencia registrada previamente con éxito.")
+            else:
+                logger.info("¡La clase ha finalizado! (No se solicitó o no se detectó toma de asistencia en esta clase).")
+            logger.info("Desconectando y cerrando el bot...")
             logger.info("=================================================================")
-            
-            # Enviar presente y finalizar
-            send_attendance_and_exit(driver, PADRON)
             break
 
+        # 2. FASE 1: Toma de Asistencia (Si aún no se envió)
+        if not attendance_sent:
+            # Asegurarse de que el chat siga abierto para leer mensajes
+            ensure_chat_open(driver)
+
+            # Escanear mensajes
+            current_matches = scan_chat_for_numbers(driver)
+
+            new_additions = False
+            for num in current_matches:
+                # Ignorar nuestro propio padrón si ya hubiese sido procesado
+                if num != PADRON and num not in unique_detected_numbers:
+                    unique_detected_numbers.add(num)
+                    new_additions = True
+                    logger.info(f"-> Nuevo padrón/DNI detectado en el chat: {num}")
+
+            if new_additions:
+                logger.info(
+                    f"Estado actual de detección: {len(unique_detected_numbers)}/{MIN_UNIQUE_NUMBERS} números distintos "
+                    f"| Detectados: {sorted(list(unique_detected_numbers))}"
+                )
+
+            # Verificación del umbral anti-falsos positivos
+            if len(unique_detected_numbers) >= MIN_UNIQUE_NUMBERS:
+                logger.info("=================================================================")
+                logger.info(f"¡Toma de asistencia confirmada! ({len(unique_detected_numbers)} números detectados).")
+                logger.info("=================================================================")
+                
+                # Enviar presente
+                if send_attendance(driver, PADRON):
+                    attendance_sent = True
+                    logger.info("=================================================================")
+                    logger.info("Presente enviado correctamente. El bot permanecerá en la llamada...")
+                    logger.info("=================================================================")
+        
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 

@@ -2,18 +2,19 @@
 
 Bot de automatización para **Google Meet** desarrollado en **Python** con **Selenium WebDriver**. 
 
-Ingresa de forma silenciosa a tus clases de Google Meet, mantiene la cámara y micrófono desactivados, abre el panel de chat y monitorea los mensajes en segundo plano. Cuando detecta que otros alumnos están enviando sus números de padrón/DNI para la asistencia, el bot envía automáticamente tu número, guarda un registro con la marca de tiempo en `asistencia.log` y se cierra de forma limpia.
+Ingresa de forma silenciosa a tus clases de Google Meet, mantiene la cámara y micrófono desactivados, abre el panel de chat y monitorea los mensajes en segundo plano. Cuando detecta que otros alumnos están enviando sus números de padrón/DNI para la asistencia, el bot envía automáticamente tu número, guarda un registro con la marca de tiempo en `asistencia.log` y **permanece en la clase hasta que la reunión finalice** (detectando cuando el profesor corta la llamada o cuando se retiran los participantes).
 
 ---
 
 ## 🚀 Características Principales
 
 - 🔐 **Uso de Perfil Local (Bypass de Login Google)**: Utiliza la carpeta `user-data-dir` de tu navegador Chrome para aprovechar tu sesión ya iniciada y evitar bloqueos o captchas de bots de Google.
-- 🔇 **Ingreso Silencioso**: Pasa flags al navegador (`--use-fake-ui-for-media-stream`, `--mute-audio`) para asegurar que el micrófono y la cámara permanezcan bloqueados al ingresar.
+- 🔇 **Ingreso Silencioso**: Pasa flags al navegador (`--use-fake-ui-for-media-stream`, `--mute-audio`) y atajos de teclado para asegurar que el micrófono y la cámara permanezcan bloqueados al ingresar.
 - 💬 **Apertura Automática de Chat**: Detecta si el panel de chat está activo y lo abre si es necesario para cargar el DOM de mensajes.
 - 🔍 **Detección por Regex**: Filtra patrones numéricos de 5 a 8 dígitos (DNIs o Padrones universitarios).
-- 🛡️ **Lógica Anti-Falsos Positivos**: Cuenta números distintos enviados por otros usuarios antes de proceder. Requiere al menos 3 padrones únicos para confirmar que la cátedra está tomando lista.
-- 📝 **Log con timestamp**: Registra en un archivo `asistencia.log` la hora exacta en la que diste el presente.
+- 🛡️ **Lógica Anti-Falsos Positivos**: Cuenta números distintos enviados por otros usuarios antes de proceder. Requiere al menos 5 padrones únicos (configurables) para confirmar que la cátedra está tomando lista.
+- ⏳ **Permanencia y Detección de Fin de Clase**: Permanece en la videollamada tras enviar el presente y se desconecta de forma limpia cuando el profesor finaliza la reunión o cuando te quedas solo en la sala.
+- 📝 **Log con timestamp**: Registra en un archivo `asistencia.log` la hora exacta en la que diste el presente y el evento de cierre de la clase.
 
 ---
 
@@ -109,7 +110,8 @@ python3 meet_bot.py
 3. Silencia cámara y micrófono.
 4. Abre el panel de chat en la barra lateral.
 5. Monitorea los mensajes cada 3 segundos.
-6. Al detectar al menos **3 padrones distintos** enviados por otros usuarios, escribe tu padrón, presiona **Enter**, guarda la hora en `asistencia.log` y cierra el navegador.
+6. Al detectar al menos **5 padrones distintos** enviados por otros usuarios, escribe tu padrón, presiona **Enter** y guarda la hora en `asistencia.log`.
+7. Permanece en la videollamada en segundo plano y se desconecta automáticamente cuando el profesor finaliza la reunión o cuando la sala queda vacía.
 
 ---
 
@@ -124,8 +126,11 @@ El script registrará la salida en consola y creará un archivo `asistencia.log`
 [2026-08-30 18:35:10] [INFO] -> Nuevo padrón/DNI detectado en el chat: 98123
 [2026-08-30 18:35:13] [INFO] -> Nuevo padrón/DNI detectado en el chat: 104521
 [2026-08-30 18:35:16] [INFO] -> Nuevo padrón/DNI detectado en el chat: 88741
-[2026-08-30 18:35:16] [INFO] ¡Toma de asistencia confirmada! (3 números detectados).
+[2026-08-30 18:35:16] [INFO] ¡Toma de asistencia confirmada! (5 números detectados).
 [2026-08-30 18:35:17] [INFO] === PRESENTE ENVIADO CON ÉXITO === | Padrón: 109876 | Hora: 2026-08-30 18:35:17
+[2026-08-30 18:35:17] [INFO] Presente enviado correctamente. El bot permanecerá en la llamada...
+[2026-08-30 20:15:00] [INFO] Detección de fin de llamada: Quedaste solo en la reunión.
+[2026-08-30 20:15:00] [INFO] ¡La clase ha finalizado! Desconectando y cerrando el bot...
 ```
 
 ---
